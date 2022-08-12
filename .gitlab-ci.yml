@@ -1,0 +1,110 @@
+image:
+  name: hashicorp/terraform
+  entrypoint:
+    - '/usr/bin/env'
+    - 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+    - 'AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}'
+    - 'AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}'
+
+cache:
+  paths:
+    - .
+
+before_script:
+  - terraform init -backend-config='key=terraform.tfstate'
+
+stages:
+  - validate
+  - plan
+  - apply
+  - ansible
+  - docker_build
+  - docker_deploy
+  - destroy
+
+validate:
+  when: always
+  stage: validate
+  script:
+    - terraform validate
+  only:
+    - main
+
+plan:
+  when: on_success
+  stage: plan
+  dependencies:
+    - validate
+  script:
+    - terraform plan
+  only:
+    - main
+
+apply:
+  when: on_success
+  stage: apply
+  dependencies:
+    - plan
+  script:
+    - terraform apply -auto-approve
+  only:
+    - main
+
+ansible:
+  when: on_success
+  stage: ansible
+  dependencies:
+    - apply
+  image: registry.gitlab.com/torese/docker-ansible
+  before_script:
+    - echo ansible
+  script:
+    - mkdir -p ~/.ssh
+    - cd ansible/
+    - cat my_known_hosts >> ~/.ssh/known_hosts
+    - yum install openssh-clients -y
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - export ANSIBLE_HOST_KEY_CHECKING=False
+    - ansible-playbook -i hosts -u ubuntu playbook.yml -vv
+
+docker_build:
+  when: on_success
+  stage: docker_build
+  dependencies:
+    - ansible
+  image: docker:20.10.16
+  services:
+    - docker:20.10.16-dind
+  before_script:
+    - docker info
+  script:
+    - docker build -t luriel/site-proevolua:1 docker/
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
+    - docker push luriel/site-proevolua:1
+
+docker_deploy:
+  when: on_success
+  stage: docker_deploy
+  dependencies:
+    - docker_build
+  image: registry.gitlab.com/torese/docker-ansible
+  before_script:
+    - echo ansible
+  script:
+    - mkdir -p ~/.ssh
+    - cd ansible/
+    - cat my_known_hosts >> ~/.ssh/known_hosts
+    - yum install openssh-clients -y
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - export ANSIBLE_HOST_KEY_CHECKING=False
+    - ansible-playbook -i hosts -u ubuntu playbook-compose.yml -vv
+
+destroy:
+  when: manual
+  stage: destroy
+  script:
+    - terraform destroy -auto-approve
+  only:
+    - main
